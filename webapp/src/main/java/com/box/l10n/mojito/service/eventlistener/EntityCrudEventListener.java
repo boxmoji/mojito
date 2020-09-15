@@ -9,7 +9,6 @@ import com.box.l10n.mojito.entity.TMTextUnitVariant;
 import com.box.l10n.mojito.service.repository.statistics.RepositoryStatisticService;
 import com.box.l10n.mojito.service.repository.statistics.RepositoryStatisticsUpdatedReactor;
 import com.google.common.collect.Sets;
-import java.util.Set;
 import org.hibernate.event.spi.PostCommitDeleteEventListener;
 import org.hibernate.event.spi.PostCommitInsertEventListener;
 import org.hibernate.event.spi.PostCommitUpdateEventListener;
@@ -21,6 +20,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+
+import java.util.Set;
 
 /**
  * Sets repository statistics outdated when the events that requires repository
@@ -57,6 +58,7 @@ public class EntityCrudEventListener implements PostCommitInsertEventListener, P
             TMTextUnitVariant tmTextUnitVariant = (TMTextUnitVariant) entity;
             TMTextUnit tmTextUnit = tmTextUnitVariant.getTmTextUnit();
             repository = tmTextUnit.getAsset().getRepository();
+            // TODO(perf) this too much we should just update the proper locale
             logger.debug("Repository statistics is outdated because string/translation is added");
         }
 
@@ -76,6 +78,11 @@ public class EntityCrudEventListener implements PostCommitInsertEventListener, P
             Asset asset = (Asset) entity;
             repository = asset.getRepository();
             logger.debug("Repository statistics is outdated because asset is updated");
+        }  else if (entity instanceof TMTextUnitCurrentVariant) {
+            //TODO(perf) we don't delete anymore, we now mark to null - need to check if it is not used in other places
+            TMTextUnitCurrentVariant tmTextUnitCurrentVariant = (TMTextUnitCurrentVariant) entity;
+            repository = tmTextUnitCurrentVariant.getTmTextUnit().getAsset().getRepository();
+            logger.debug("Repository statistics is outdated because translation is deleted");
         }
 
         setRepositoryStatistisOutOfDate(repository);
@@ -91,6 +98,7 @@ public class EntityCrudEventListener implements PostCommitInsertEventListener, P
             repository = repositoryLocale.getRepository();
             logger.debug("Repository statistics is outdated because locale is deleted");
         } else if (entity instanceof TMTextUnitCurrentVariant) {
+            //TODO(perf) we don't delete anymore, we now mark to null - need to check if it is not used in other places
             TMTextUnitCurrentVariant tmTextUnitCurrentVariant = (TMTextUnitCurrentVariant) entity;
             repository = tmTextUnitCurrentVariant.getTmTextUnit().getAsset().getRepository();
             logger.debug("Repository statistics is outdated because translation is deleted");

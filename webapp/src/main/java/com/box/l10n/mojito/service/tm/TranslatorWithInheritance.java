@@ -11,13 +11,15 @@ import com.box.l10n.mojito.service.tm.search.StatusFilter;
 import com.box.l10n.mojito.service.tm.search.TextUnitDTO;
 import com.box.l10n.mojito.service.tm.search.TextUnitSearcher;
 import com.box.l10n.mojito.service.tm.search.TextUnitSearcherParameters;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import com.box.l10n.mojito.service.tm.textunitdtocache.TextUnitDTOsCacheService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Configurable;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * @author jeanaurambault
@@ -50,13 +52,17 @@ public class TranslatorWithInheritance {
     InheritanceMode inheritanceMode;
 
     RepositoryLocale repositoryLocale;
-
-    private StatusFilter statusFilter;
-
     /**
      * Cache that contains the translations required to translate the asset.
      */
     Map<Long, Map<String, TextUnitDTO>> localeToTextUnitDTOsForLocaleMap = new HashMap<>();
+
+    boolean newImplementation = true;
+
+    @Autowired
+    TextUnitDTOsCacheService textUnitDTOsCacheService;
+
+    private StatusFilter statusFilter;
 
     public TranslatorWithInheritance(Asset asset, RepositoryLocale repositoryLocale, InheritanceMode inheritanceMode) {
         this(asset, repositoryLocale, inheritanceMode, StatusFilter.TRANSLATED_AND_NOT_REJECTED);
@@ -104,7 +110,7 @@ public class TranslatorWithInheritance {
 
         return textUnitDTO;
     }
-    
+
     public boolean hasTranslationWithoutInheritance() {
         return !getTextUnitDTOsForLocaleMapFromCache(repositoryLocale.getLocale().getId()).isEmpty();
     }
@@ -118,7 +124,7 @@ public class TranslatorWithInheritance {
      * for optimization purpose, the translations fetched would be the same as
      * the source, hence returning the source directly is more efficient.
      *
-     * @param md5 MD5 to lookup the translation
+     * @param md5    MD5 to lookup the translation
      * @param source the source to fallback to if there is no translation
      * @return the translation from a parent locale if it exists else null
      */
@@ -151,8 +157,8 @@ public class TranslatorWithInheritance {
      * Gets a {@link TextUnitDTO} from the cache for a given locale and text
      * unit MD5.
      *
-     * @param md5 the MD5 of the text unit (see
-     * {@link TMService#computeTMTextUnitMD5(java.lang.String, java.lang.String, java.lang.String)})
+     * @param md5      the MD5 of the text unit (see
+     *                 {@link TMService#computeTMTextUnitMD5(java.lang.String, java.lang.String, java.lang.String)})
      * @param localeId the {@link Locale#id}
      * @return a {@link TextUnitDTO} or {@code null} if no translation is
      * available
@@ -193,6 +199,10 @@ public class TranslatorWithInheritance {
      */
     private Map<String, TextUnitDTO> getTextUnitDTOsForLocaleByMD5(Long localeId) {
 
+        if (newImplementation) {
+            return textUnitDTOsCacheService.getTextUnitDTOsForAssetAndLocaleByMD5(asset.getId(), localeId, statusFilter, false, true);
+        }
+
         Map<String, TextUnitDTO> res = new HashMap<>();
 
         logger.debug("Prepare TextUnitSearcherParameters to fetch translation for locale: {}", localeId);
@@ -212,5 +222,6 @@ public class TranslatorWithInheritance {
 
         return res;
     }
+
 
 }

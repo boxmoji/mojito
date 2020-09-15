@@ -1,12 +1,16 @@
 package com.box.l10n.mojito.service.branch;
 
 import com.box.l10n.mojito.entity.Branch;
-import com.box.l10n.mojito.entity.BranchNotification;
 import com.box.l10n.mojito.entity.BranchStatistic;
 import com.box.l10n.mojito.entity.BranchTextUnitStatistic;
+import com.box.l10n.mojito.entity.Repository;
+import com.box.l10n.mojito.ltm.merger.BranchStateTextUnitJson;
+import com.box.l10n.mojito.ltm.merger.MultiBranchStateJson;
 import com.box.l10n.mojito.quartz.QuartzJobInfo;
 import com.box.l10n.mojito.quartz.QuartzPollableTaskScheduler;
+import com.box.l10n.mojito.service.asset.AssetRepository;
 import com.box.l10n.mojito.service.assetExtraction.AssetTextUnitToTMTextUnitRepository;
+import com.box.l10n.mojito.service.assetExtraction.MultiBranchStateJsonService;
 import com.box.l10n.mojito.service.branch.notification.job.BranchNotificationJob;
 import com.box.l10n.mojito.service.branch.notification.job.BranchNotificationJobInput;
 import com.box.l10n.mojito.service.tm.TMTextUnitRepository;
@@ -14,17 +18,23 @@ import com.box.l10n.mojito.service.tm.search.TextUnitAndWordCount;
 import com.box.l10n.mojito.service.tm.search.TextUnitDTO;
 import com.box.l10n.mojito.service.tm.search.TextUnitSearcher;
 import com.box.l10n.mojito.service.tm.search.TextUnitSearcherParameters;
+import com.box.l10n.mojito.service.tm.textunitdtocache.TextUnitDTOsCacheService;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import org.slf4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static com.box.l10n.mojito.service.assetExtraction.AssetExtractionService.PRIMARY_BRANCH;
 import static com.box.l10n.mojito.service.tm.search.StatusFilter.FOR_TRANSLATION;
+import static com.box.l10n.mojito.utils.Predicates.not;
 import static org.slf4j.LoggerFactory.getLogger;
 
 @Component
@@ -59,6 +69,17 @@ public class BranchStatisticService {
     @Autowired
     AssetTextUnitToTMTextUnitRepository assetTextUnitToTMTextUnitRepository;
 
+    @Autowired
+    MultiBranchStateJsonService multiBranchStateJsonService;
+
+    @Autowired
+    AssetRepository assetRepository;
+
+    @Autowired
+    TextUnitDTOsCacheService textUnitDTOsCacheService;
+
+    private boolean newImplementation = true;
+
     /**
      * Compute statistics for all branches that are not deleted in a given repository.
      *
@@ -80,8 +101,112 @@ public class BranchStatisticService {
         QuartzJobInfo quartzJobInfo = QuartzJobInfo.newBuilder(BranchNotificationJob.class)
                 .withUniqueId(String.valueOf(branch.getId()))
                 .withInput(branchNotificationJobInput).build();
-
         quartzPollableTaskScheduler.scheduleJob(quartzJobInfo);
+    }
+
+
+    public void computeAndSaveBranchStatisticsNew(Branch branch) {
+        logger.debug("computeAndSaveBranchStatisticsNew for branch: {} ({})", branch.getId(), branch.getName());
+
+        Repository repository = branch.getRepository();
+
+        ImmutableMap<Long, ForTranslationCountForTmTextUnitId> tmTextUnitIdToForTranslationCount = assetRepository.findIdByRepositoryIdAndDeleted(repository.getId(), false).stream()
+                .flatMap(assetId -> {
+
+                    MultiBranchStateJson multiBranchStateJson = multiBranchStateJsonService.readMultiBranchStateJson(assetId);
+                    ImmutableList<Long> tmTextUnitIds = multiBranchStateJson.getBranchStateTextUnitJsons().stream()
+                            .filter(bstuj -> bstuj.getBranchNamesToBranchDatas().containsKey(branch.getName()))
+                            .map(BranchStateTextUnitJson::getId)
+                            .collect(ImmutableList.toImmutableList());
+
+                    logger.debug("tmTextUnitIds in branch: {} : {}", branch.getName(), tmTextUnitIds);
+
+                    return repository.getRepositoryLocales().stream()
+                            .filter(rl -> rl.getParentLocale() != null && rl.isToBeFullyTranslated())
+                            .flatMap(rl -> {
+                                logger.debug("Proccesing asset id: {} for branch: {}", assetId, branch.getName());
+
+                                //TODO(perf) stop refetching over and over, cache or whatever + lookup by id
+                                Map<String, TextUnitDTO> textUnitDTOsForLocaleByMD5New = textUnitDTOsCacheService.getTextUnitDTOsForAssetAndLocaleByMD5(assetId, rl.getLocale().getId(), null, false, true);
+
+                                return tmTextUnitIds.stream()
+                                        .map(tmTextUnitId -> {
+                                            long forTranslationCount = textUnitDTOsForLocaleByMD5New.values().stream()
+                                                    .filter(t -> t.getTmTextUnitId().equals(tmTextUnitId))
+                                                    .filter(TextUnitDTO::isUsed)
+                                                    .filter(not(TextUnitDTO::isDoNotTranslate))
+                                                    .filter(textUnitDTOsCacheService.statusPredicate(FOR_TRANSLATION))
+                                                    .peek(t -> logger.debug("for translation in branch {} for {}: {} ({})", branch.getName(), t.getTargetLocale(), t.getName(), tmTextUnitId))
+                                                    .count();
+
+                                            long totalCount = textUnitDTOsForLocaleByMD5New.values().stream()
+                                                    .filter(t -> t.getTmTextUnitId().equals(tmTextUnitId))
+                                                    .filter(TextUnitDTO::isUsed)
+                                                    .filter(not(TextUnitDTO::isDoNotTranslate))
+                                                    .peek(t -> logger.debug("total count in branch {} for {}: {} ({})", branch.getName(), t.getTargetLocale(), t.getName(), tmTextUnitId))
+                                                    .count();
+
+                                            return new ForTranslationCountForTmTextUnitId(tmTextUnitId, forTranslationCount, totalCount);
+                                        });
+                            });
+
+                })
+                .collect(ImmutableMap.toImmutableMap(ForTranslationCountForTmTextUnitId::getTmTextUnitId, Function.identity(), (t1, t2) -> {
+                    return new ForTranslationCountForTmTextUnitId(t1.getTmTextUnitId(), t1.getForTranslationCount() + t2.getForTranslationCount(), t1.getTotalCount() + t2.getTotalCount());
+                }));
+
+
+        BranchStatistic branchStatistic = branchStatisticRepository.findByBranch(branch);
+
+        if (branchStatistic == null) {
+            logger.debug("No branchStatistic, create it");
+            branchStatistic = new BranchStatistic();
+            branchStatistic.setBranch(branch);
+            branchStatistic = branchStatisticRepository.save(branchStatistic);
+        }
+
+        long sumTotalCount = 0;
+        long sumForTranslationCount = 0;
+
+        for (Long tmTextUnitId : tmTextUnitIdToForTranslationCount.keySet()) {
+
+            logger.debug("Get BranchTextUnitStatistic for tmTextUnitId: {}", tmTextUnitId);
+            BranchTextUnitStatistic branchTextUnitStatistic = branchTextUnitStatisticRepository.getByBranchStatisticIdAndTmTextUnitId(branchStatistic.getId(), tmTextUnitId);
+
+            if (branchTextUnitStatistic == null) {
+                logger.debug("BranchTextUnitStatistic entity doesn't exist, create it");
+                branchTextUnitStatistic = new BranchTextUnitStatistic();
+                branchTextUnitStatistic.setBranchStatistic(branchStatistic);
+                branchTextUnitStatistic.setTmTextUnit(tmTextUnitRepository.getOne(tmTextUnitId));
+            }
+
+            long forTranslationCount = tmTextUnitIdToForTranslationCount.get(tmTextUnitId).getForTranslationCount();
+            sumForTranslationCount += forTranslationCount;
+
+            long totalCount =  tmTextUnitIdToForTranslationCount.get(tmTextUnitId).getTotalCount();
+            sumTotalCount += totalCount;
+
+            logger.debug("Update counts, forTranslation: {}, total: {}", forTranslationCount, totalCount);
+            branchTextUnitStatistic.setForTranslationCount(forTranslationCount);
+            branchTextUnitStatistic.setTotalCount(totalCount);
+
+            branchTextUnitStatisticRepository.save(branchTextUnitStatistic);
+        }
+
+        branchStatistic.setForTranslationCount(sumForTranslationCount);
+        branchStatistic.setTotalCount(sumTotalCount);
+        branchStatisticRepository.save(branchStatistic);
+
+        logger.debug("Remove statistic for unused text units for branch: {} ({})", branch.getId(), branch.getName());
+
+        Set<Long> tmTextUnitIdsToRemove = branchStatistic.getBranchTextUnitStatistics().stream().
+                map(branchTextUnitStatistic -> branchTextUnitStatistic.getTmTextUnit().getId()).
+                filter(id -> !tmTextUnitIdToForTranslationCount.keySet().contains(id)).
+                collect(Collectors.toSet());
+
+        int removedCount = branchTextUnitStatisticRepository.deleteByBranchStatisticBranchIdAndTmTextUnitIdIn(branch.getId(), tmTextUnitIdsToRemove);
+        logger.debug("Removed statistic: {}", removedCount);
+
     }
 
     /**
@@ -90,6 +215,11 @@ public class BranchStatisticService {
      * @param branch
      */
     public void computeAndSaveBranchStatistics(Branch branch) {
+
+        if (newImplementation) {
+            computeAndSaveBranchStatisticsNew(branch);
+            return;
+        }
 
         logger.debug("computeAndSaveBranchStatistics for branch: {} ({})", branch.getId(), branch.getName());
 
